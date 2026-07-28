@@ -111,6 +111,15 @@ static XrmOption xrmOptions[] = {
         "Available layers are background, bottom, top, overlay.",
     },
     {
+        xrm_String,
+        CONFIG_DEFAULT,
+        "app-id",
+        {.str = &config.app_id},
+        NULL,
+        "Application identifier used to identify rofi to the window manager or "
+        "compositor.",
+    },
+    {
         xrm_SNumber,
         CONFIG_DEFAULT,
         "yoffset",

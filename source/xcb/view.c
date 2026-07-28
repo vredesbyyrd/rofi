@@ -770,9 +770,21 @@ static void xcb___create_window(MenuFlags menu_flags) {
   TICK_N("setup window fullscreen");
   // Set the WM_NAME
   xcb_rofi_view_set_window_title("rofi");
-  const char wm_class_name[] = "rofi\0Rofi";
-  xcb_icccm_set_wm_class(xcb->connection, box_window, sizeof(wm_class_name),
-                         wm_class_name);
+  if (config.app_id == NULL || *config.app_id == '\0' ||
+      g_strcmp0(config.app_id, "rofi") == 0) {
+    const char wm_class_name[] = "rofi\0Rofi";
+    xcb_icccm_set_wm_class(xcb->connection, box_window, sizeof(wm_class_name),
+                           wm_class_name);
+  } else {
+    // WM_CLASS holds two consecutive nul-terminated strings: the instance
+    // name followed by the class name.
+    gsize len = strlen(config.app_id) + 1;
+    char *wm_class_name = g_malloc(len * 2);
+    memcpy(wm_class_name, config.app_id, len);
+    memcpy(wm_class_name + len, config.app_id, len);
+    xcb_icccm_set_wm_class(xcb->connection, box_window, len * 2, wm_class_name);
+    g_free(wm_class_name);
+  }
 
   TICK_N("setup window name and class");
   const char *transparency =

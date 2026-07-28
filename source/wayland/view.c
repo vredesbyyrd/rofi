@@ -80,8 +80,9 @@ static struct {
   /** Window fullscreen */
   gboolean fullscreen;
 
-  int monitor_width;
-  int monitor_height;
+  /** Size dictated by the compositor, 0 on an axis we are free to pick. */
+  int configured_width;
+  int configured_height;
 
   int surface_width;
   int surface_height;
@@ -98,8 +99,8 @@ static struct {
     .count = 0L,
     .repaint_source = 0,
     .fullscreen = FALSE,
-    .monitor_width = 0,
-    .monitor_height = 0,
+    .configured_width = 0,
+    .configured_height = 0,
 
     .surface_width = 0,
     .surface_height = 0,
@@ -112,18 +113,18 @@ static struct {
 };
 
 static void wayland_rofi_view_get_current_monitor(int *width, int *height) {
-  // TODO: handle changing monitor resolution
-  if (WlState.monitor_width == 0 && WlState.monitor_height == 0) {
-    display_get_surface_dimensions(&WlState.monitor_width,
-                                   &WlState.monitor_height);
-  }
-
   if (width) {
-    *width = WlState.monitor_width;
+    *width = 0;
   }
   if (height) {
-    *height = WlState.monitor_height;
+    *height = 0;
   }
+  display_get_output_dimensions(width, height);
+}
+
+void wayland_rofi_view_set_configured_size(int width, int height) {
+  WlState.configured_width = width;
+  WlState.configured_height = height;
 }
 
 static gboolean wayland_rofi_view_repaint(G_GNUC_UNUSED void *data) {
@@ -254,7 +255,7 @@ static void wayland_rofi_view_window_update_size(RofiViewState *state) {
   WlState.menu_width = state->width;
   WlState.menu_height = state->height;
 
-  if (config.click_to_exit) {
+  if (display_capture_outside_clicks()) {
     window_update_size_with_outside_click(state, offset_x, offset_y);
   } else {
     window_update_size_normal(state, offset_x, offset_y);
@@ -394,8 +395,14 @@ static void wayland___create_window(MenuFlags menu_flags) {
  * Calculate the width of the window and the width of an element.
  */
 static void wayland_rofi_view_calculate_window_width(RofiViewState *state) {
+  // A normal window is sized by the compositor, so it has the last word.
+  if (WlState.configured_width > 0) {
+    state->width = WlState.configured_width;
+    return;
+  }
+
   int screen_width = 1920;
-  display_get_surface_dimensions(&screen_width, NULL);
+  display_get_output_dimensions(&screen_width, NULL);
 
   if (WlState.fullscreen == TRUE) {
     state->width = screen_width;
@@ -417,10 +424,11 @@ static void wayland_rofi_view_update(RofiViewState *state, gboolean qr) {
   g_debug("Redraw view");
   TICK();
 
+  gboolean capture = display_capture_outside_clicks();
   int buffer_width = state->width;
   int buffer_height = state->height;
 
-  if (config.click_to_exit) {
+  if (capture) {
     buffer_width = WlState.surface_width;
     buffer_height = WlState.surface_height;
   }
@@ -448,7 +456,7 @@ static void wayland_rofi_view_update(RofiViewState *state, gboolean qr) {
   // Always paint as overlay over the background.
   cairo_set_operator(d, CAIRO_OPERATOR_OVER);
 
-  if (config.click_to_exit) {
+  if (capture) {
     g_debug("draw capture mode: surface=%dx%d menu=%dx%d pos=(%d,%d)",
             WlState.surface_width, WlState.surface_height, WlState.menu_width,
             WlState.menu_height, WlState.menu_x, WlState.menu_y);
@@ -476,9 +484,13 @@ static void wayland_rofi_view_frame_callback(void) {
 }
 
 static int wayland_rofi_view_calculate_window_height(RofiViewState *state) {
+  if (WlState.configured_height > 0) {
+    return WlState.configured_height;
+  }
+
   if (WlState.fullscreen == TRUE) {
     int height = 1080;
-    display_get_surface_dimensions(NULL, &height);
+    display_get_output_dimensions(NULL, &height);
     return height;
   }
 
@@ -523,8 +535,9 @@ static void wayland_rofi_view_cleanup(void) {
   input_history_save();
 }
 
-static void
-wayland_rofi_view_set_window_title(G_GNUC_UNUSED const char *title) {}
+static void wayland_rofi_view_set_window_title(const char *title) {
+  display_set_window_title(title);
+}
 
 static void wayland_rofi_view_pool_refresh(void) {
   RofiViewState *state = rofi_view_get_active();

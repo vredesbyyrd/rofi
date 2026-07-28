@@ -320,6 +320,7 @@ if wayland_enabled
         wayland_sys_protocols_dir + '/unstable/primary-selection/primary-selection-unstable-v1.xml',
         wayland_sys_protocols_dir + '/unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml',
         wayland_sys_protocols_dir + '/unstable/text-input/text-input-unstable-v3.xml',
+        wayland_sys_protocols_dir + '/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml',
         'protocols/wlr-foreign-toplevel-management-unstable-v1.xml',
         'protocols/wlr-layer-shell-unstable-v1.xml',
     )
@@ -355,6 +356,7 @@ if wayland_enabled
         'source/modes/wayland-window.c',
         'source/wayland/view.c',
         'source/wayland/display.c',
+        'source/wayland/xdg-shell.c',
         'include/modes/wayland-window.h',
         'include/wayland-internal.h',
     )

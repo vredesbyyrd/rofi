@@ -40,11 +40,35 @@ void display_buffer_pool_free(display_buffer_pool *pool);
 cairo_surface_t *display_buffer_pool_get_next_buffer(display_buffer_pool *pool);
 void display_surface_commit(cairo_surface_t *surface);
 
-gboolean display_get_surface_dimensions(int *width, int *height);
+/**
+ * Usable area of the output rofi is displayed on, in logical pixels.
+ *
+ * @returns FALSE if the size is not known yet.
+ */
+gboolean display_get_output_dimensions(int *width, int *height);
 void display_set_surface_dimensions(int width, int height, int x_margin,
                                     int y_margin, int loc);
 
+/**
+ * Whether clicks outside of the menu should be caught to dismiss rofi. This
+ * requires a surface covering the output, which only the layer shell can do.
+ */
+gboolean display_capture_outside_clicks(void);
+
+/**
+ * Set the window title, if the shell in use has one.
+ */
+void display_set_window_title(const char *title);
+
 void wayland_display_set_cursor_type(RofiCursorType type);
+
+/**
+ * @param width  Width assigned by the compositor, 0 if it is ours to pick.
+ * @param height Height assigned by the compositor, 0 if it is ours to pick.
+ *
+ * Record the size the compositor dictated for the window.
+ */
+void wayland_rofi_view_set_configured_size(int width, int height);
 
 /**
  * Tries to guess the DPI.

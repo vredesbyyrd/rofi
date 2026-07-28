@@ -50,6 +50,7 @@
 
 #include <rofi.h>
 
+#include "helper.h"
 #include "input-codes.h"
 #include "keyb.h"
 #include "rofi-types.h"
@@ -67,6 +68,8 @@
 #include "primary-selection-unstable-v1-protocol.h"
 #include "text-input-unstable-v3-protocol.h"
 #include "wlr-layer-shell-unstable-v1-protocol.h"
+#include "xdg-decoration-unstable-v1-protocol.h"
+#include "xdg-shell-protocol.h"
 
 #define wayland_output_get_dpi(output, scale, dimension)                       \
   ((output)->current.physical_##dimension > 0 && (scale) > 0                   \
@@ -113,6 +116,8 @@ static gboolean wayland_display_late_setup(void);
 
 static wayland_stuff wayland_;
 wayland_stuff *wayland = &wayland_;
+/** Output the surface is currently displayed on, NULL until it is mapped. */
+static wayland_output *wayland_current_output = NULL;
 static const cairo_user_data_key_t wayland_cairo_surface_user_data;
 
 static const struct zwp_text_input_v3_listener text_input_listener;
@@ -273,6 +278,7 @@ static void wayland_surface_protocol_enter(void *data,
   if (output == NULL) {
     return;
   }
+  wayland_current_output = output;
 
   if (config.dpi == 0 || config.dpi == 1) {
     // DPI auto-detect requested.
@@ -297,7 +303,12 @@ static void wayland_surface_protocol_enter(void *data,
 
 static void wayland_surface_protocol_leave(void *data,
                                            struct wl_surface *wl_surface,
-                                           struct wl_output *wl_output) {}
+                                           struct wl_output *wl_output) {
+  if (wayland_current_output != NULL &&
+      wayland_current_output->output == wl_output) {
+    wayland_current_output = NULL;
+  }
+}
 
 static const struct wl_surface_listener wayland_surface_interface = {
     .enter = wayland_surface_protocol_enter,
@@ -420,7 +431,15 @@ static void wayland_keyboard_leave(void *data, struct wl_keyboard *keyboard,
                                    uint32_t serial,
                                    struct wl_surface *surface) {
   wayland_seat *self = data;
-  // TODO?
+
+  // Losing focus does not close rofi, so stop repeating whatever key was held
+  // on the way out. Otherwise it would keep firing while another window has
+  // the keyboard.
+  self->repeat.key = 0;
+  if (self->repeat.source != NULL) {
+    g_source_destroy(self->repeat.source);
+    self->repeat.source = NULL;
+  }
 }
 
 static gboolean wayland_key_repeat(void *data) {
@@ -616,7 +635,7 @@ static void wayland_pointer_send_events(wayland_seat *self) {
 
   int menu_x = 0, menu_y = 0, menu_w = 0, menu_h = 0;
 
-  gboolean capture = config.click_to_exit;
+  gboolean capture = display_capture_outside_clicks();
 
   if (capture) {
     rofi_view_get_menu_rect(&menu_x, &menu_y, &menu_w, &menu_h);
@@ -1332,6 +1351,10 @@ static const struct zwp_text_input_v3_listener text_input_listener = {
 static void wayland_output_release(wayland_output *self) {
   g_debug("Output release: %s", self->name);
 
+  if (wayland_current_output == self) {
+    wayland_current_output = NULL;
+  }
+
   if (wl_output_get_version(self->output) >= WL_OUTPUT_RELEASE_SINCE_VERSION) {
     wl_output_release(self->output);
   } else {
@@ -1362,6 +1385,51 @@ static wayland_output *wayland_output_by_name(const char *name) {
 
   return NULL;
 }
+
+gboolean wayland_display_get_output_size(int *width, int *height) {
+  wayland_output *output = wayland_current_output;
+
+  if (output == NULL && config.monitor != NULL) {
+    output = wayland_output_by_name(config.monitor);
+  }
+  if (output == NULL) {
+    GHashTableIter iter;
+    g_hash_table_iter_init(&iter, wayland->outputs);
+    g_hash_table_iter_next(&iter, NULL, (gpointer *)&output);
+  }
+  if (output == NULL || output->current.width == 0 ||
+      output->current.height == 0) {
+    return FALSE;
+  }
+
+  int32_t scale = MAX(output->current.scale, 1);
+  int32_t w = output->current.width / scale;
+  int32_t h = output->current.height / scale;
+
+  // A rotated output reports its mode in the panel's own orientation.
+  switch (output->current.transform) {
+  case WL_OUTPUT_TRANSFORM_90:
+  case WL_OUTPUT_TRANSFORM_270:
+  case WL_OUTPUT_TRANSFORM_FLIPPED_90:
+  case WL_OUTPUT_TRANSFORM_FLIPPED_270: {
+    int32_t swap = w;
+    w = h;
+    h = swap;
+    break;
+  }
+  default:
+    break;
+  }
+
+  if (width != NULL) {
+    *width = w;
+  }
+  if (height != NULL) {
+    *height = h;
+  }
+  return TRUE;
+}
+
 double wayland_get_dpi_estimation(void) {
   double retv = -1.0;
   if (wayland == 0) {
@@ -1457,6 +1525,16 @@ static const struct wl_output_listener wayland_output_listener = {
 #endif
 };
 
+static void wayland_xdg_wm_base_ping(void *data,
+                                     struct xdg_wm_base *xdg_wm_base,
+                                     uint32_t serial) {
+  xdg_wm_base_pong(xdg_wm_base, serial);
+}
+
+static const struct xdg_wm_base_listener wayland_xdg_wm_base_listener = {
+    .ping = wayland_xdg_wm_base_ping,
+};
+
 static void wayland_registry_handle_global(void *data,
                                            struct wl_registry *registry,
                                            uint32_t name, const char *interface,
@@ -1473,6 +1551,19 @@ static void wayland_registry_handle_global(void *data,
     wayland->layer_shell =
         wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface,
                          MIN(version, WL_LAYER_SHELL_INTERFACE_VERSION));
+  } else if (g_strcmp0(interface, xdg_wm_base_interface.name) == 0) {
+    wayland->global_names[WAYLAND_GLOBAL_XDG_SHELL] = name;
+    wayland->xdg_wm_base =
+        wl_registry_bind(registry, name, &xdg_wm_base_interface,
+                         MIN(version, WL_XDG_WM_BASE_INTERFACE_VERSION));
+    xdg_wm_base_add_listener(wayland->xdg_wm_base,
+                             &wayland_xdg_wm_base_listener, NULL);
+  } else if (g_strcmp0(interface, zxdg_decoration_manager_v1_interface.name) ==
+             0) {
+    wayland->global_names[WAYLAND_GLOBAL_XDG_DECORATION] = name;
+    wayland->xdg_decoration_manager =
+        wl_registry_bind(registry, name, &zxdg_decoration_manager_v1_interface,
+                         MIN(version, WL_XDG_DECORATION_INTERFACE_VERSION));
   } else if (g_strcmp0(
                  interface,
                  zwp_keyboard_shortcuts_inhibit_manager_v1_interface.name) ==
@@ -1566,6 +1657,14 @@ static void wayland_registry_handle_global_remove(void *data,
       zwlr_layer_shell_v1_destroy(wayland->layer_shell);
       wayland->layer_shell = NULL;
       break;
+    case WAYLAND_GLOBAL_XDG_SHELL:
+      xdg_wm_base_destroy(wayland->xdg_wm_base);
+      wayland->xdg_wm_base = NULL;
+      break;
+    case WAYLAND_GLOBAL_XDG_DECORATION:
+      zxdg_decoration_manager_v1_destroy(wayland->xdg_decoration_manager);
+      wayland->xdg_decoration_manager = NULL;
+      break;
     case WAYLAND_GLOBAL_KEYBOARD_SHORTCUTS_INHIBITOR:
       zwp_keyboard_shortcuts_inhibit_manager_v1_destroy(
           wayland->kb_shortcuts_inhibit_manager);
@@ -1631,15 +1730,20 @@ static const struct wl_registry_listener wayland_registry_listener = {
 static void wayland_layer_shell_surface_configure(
     void *data, struct zwlr_layer_surface_v1 *surface, uint32_t serial,
     uint32_t width, uint32_t height) {
-  wayland->layer_width = width;
-  wayland->layer_height = height;
+  // We only learn the usable area of the output from the axes we left to the
+  // compositor, which is how the size is requested at setup and in fullscreen.
+  if (wayland->layer_width == 0) {
+    wayland->output_width = width;
+  }
+  if (wayland->layer_height == 0) {
+    wayland->output_height = height;
+  }
   zwlr_layer_surface_v1_ack_configure(surface, serial);
 }
 
 static void wayland_surface_destroy(void) {
-  if (wayland->wlr_surface != NULL) {
-    zwlr_layer_surface_v1_destroy(wayland->wlr_surface);
-    wayland->wlr_surface = NULL;
+  if (wayland->shell != NULL) {
+    wayland->shell->destroy_surface();
   }
   if (wayland->surface != NULL) {
     wl_surface_destroy(wayland->surface);
@@ -1752,10 +1856,28 @@ static gboolean wayland_display_setup(GMainLoop *main_loop,
     g_error("Could not connect to wayland compositor");
     return FALSE;
   }
-  if (wayland->layer_shell == NULL) {
-    g_error("Rofi on wayland requires support for the layer shell protocol");
+  // The layer shell gives us an overlay, which is what rofi wants by default.
+  // -normal-window asks for a regular application window instead, which is an
+  // xdg-toplevel. We also fall back to one when there is no layer shell.
+  gboolean normal_window = (find_arg("-normal-window") >= 0);
+  if (normal_window && wayland->xdg_wm_base != NULL) {
+    wayland->shell = &wayland_xdg_shell;
+  } else if (wayland->layer_shell != NULL) {
+    if (normal_window) {
+      g_warning("-normal-window requires support for the xdg shell protocol, "
+                "falling back to the layer shell");
+    }
+    wayland->shell = &wayland_layer_shell;
+  } else if (wayland->xdg_wm_base != NULL) {
+    g_warning("No support for the layer shell protocol, falling back to a "
+              "normal window");
+    wayland->shell = &wayland_xdg_shell;
+  } else {
+    g_error("Rofi on wayland requires support for the layer shell or the xdg "
+            "shell protocol");
     return FALSE;
   }
+  g_debug("Using the %s", wayland->shell->name);
 
   wayland->bindings_seat = nk_bindings_seat_new(bindings, XKB_CONTEXT_NO_FLAGS);
 
@@ -1765,15 +1887,7 @@ static gboolean wayland_display_setup(GMainLoop *main_loop,
   return TRUE;
 }
 
-static gboolean wayland_display_late_setup(void) {
-  wayland_output *output = wayland_output_by_name(config.monitor);
-
-  struct wl_output *wlo = NULL;
-  if (output != NULL) {
-    wlo = output->output;
-  }
-  wayland->surface = wl_compositor_create_surface(wayland->compositor);
-
+static gboolean wayland_layer_shell_create_surface(struct wl_output *wlo) {
   uint32_t layer = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
   if (strcmp(config.wayland_layer, "overlay") == 0) {
     layer = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
@@ -1789,7 +1903,7 @@ static gboolean wayland_display_late_setup(void) {
               config.wayland_layer);
   }
   wayland->wlr_surface = zwlr_layer_shell_v1_get_layer_surface(
-      wayland->layer_shell, wayland->surface, wlo, layer, "rofi");
+      wayland->layer_shell, wayland->surface, wlo, layer, config.app_id);
 
   // Set size zero and anchor on all corners to get the usable screen size
   // see https://github.com/swaywm/wlroots/pull/2422
@@ -1798,44 +1912,35 @@ static gboolean wayland_display_late_setup(void) {
                                        ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
                                        ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT |
                                        ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+  wayland->layer_width = 0;
+  wayland->layer_height = 0;
   zwlr_layer_surface_v1_set_size(wayland->wlr_surface, 0, 0);
   zwlr_layer_surface_v1_set_keyboard_interactivity(wayland->wlr_surface, 1);
   zwlr_layer_surface_v1_add_listener(
       wayland->wlr_surface, &wayland_layer_shell_surface_listener, NULL);
 
-  if (config.global_kb && wayland->kb_shortcuts_inhibit_manager) {
-    g_debug("inhibit shortcuts from compositor");
-    GHashTableIter iter;
-    wayland_seat *seat;
-    g_hash_table_iter_init(&iter, wayland->seats);
-    while (g_hash_table_iter_next(&iter, NULL, (gpointer *)&seat)) {
-      // we don't need to keep track of these, they will get inactive when the
-      // surface is destroyed
-      zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts(
-          wayland->kb_shortcuts_inhibit_manager, wayland->surface, seat->seat);
-    }
-  }
-
-  wl_surface_add_listener(wayland->surface, &wayland_surface_interface,
-                          wayland);
-  wl_surface_commit(wayland->surface);
-  wl_display_roundtrip(wayland->display);
-  wayland_frame_callback(wayland, wayland->frame_cb, 0);
-
   return TRUE;
 }
 
-gboolean display_get_surface_dimensions(int *width, int *height) {
-  if (wayland->layer_width != 0) {
-    if (width != NULL) {
-      *width = wayland->layer_width;
-    }
-    if (height != NULL) {
-      *height = wayland->layer_height;
-    }
-    return TRUE;
+static void wayland_layer_shell_destroy_surface(void) {
+  if (wayland->wlr_surface != NULL) {
+    zwlr_layer_surface_v1_destroy(wayland->wlr_surface);
+    wayland->wlr_surface = NULL;
   }
-  return FALSE;
+}
+
+static gboolean wayland_layer_shell_get_output_dimensions(int *width,
+                                                          int *height) {
+  if (wayland->output_width == 0) {
+    return FALSE;
+  }
+  if (width != NULL) {
+    *width = wayland->output_width;
+  }
+  if (height != NULL) {
+    *height = wayland->output_height;
+  }
+  return TRUE;
 }
 
 /* Click-capture is limited to the current output. If the menu is larger than
@@ -1843,9 +1948,9 @@ gboolean display_get_surface_dimensions(int *width, int *height) {
  * will not be part of the capture surface and clicks there will not trigger
  * click-to-exit.
  */
-void display_set_surface_dimensions(int width, int height, int x_margin,
-                                    int y_margin, int loc) {
-
+static void wayland_layer_shell_set_dimensions(int width, int height,
+                                               int x_margin, int y_margin,
+                                               int loc) {
   wayland->layer_width = width;
   wayland->layer_height = height;
   zwlr_layer_surface_v1_set_size(wayland->wlr_surface, width, height);
@@ -1902,6 +2007,87 @@ void display_set_surface_dimensions(int width, int height, int x_margin,
   // margin has no effect if the window is centered. :(
   zwlr_layer_surface_v1_set_margin(wayland->wlr_surface, y_margin, -x_margin,
                                    -y_margin, x_margin);
+}
+
+static void wayland_layer_shell_set_fullscreen(void) {
+  if (!wayland->wlr_surface) {
+    return;
+  }
+  zwlr_layer_surface_v1_set_exclusive_zone(wayland->wlr_surface, -1);
+  wayland->layer_width = 0;
+  wayland->layer_height = 0;
+  zwlr_layer_surface_v1_set_size(wayland->wlr_surface, 0, 0);
+  wl_surface_commit(wayland->surface);
+  wl_display_roundtrip(wayland->display);
+
+  rofi_view_pool_refresh();
+}
+
+static void wayland_layer_shell_set_title(G_GNUC_UNUSED const char *title) {
+  // Layer surfaces have no title.
+}
+
+const wayland_shell wayland_layer_shell = {
+    .name = "layer shell",
+    .captures_outside_clicks = TRUE,
+    .create_surface = wayland_layer_shell_create_surface,
+    .destroy_surface = wayland_layer_shell_destroy_surface,
+    .set_dimensions = wayland_layer_shell_set_dimensions,
+    .get_output_dimensions = wayland_layer_shell_get_output_dimensions,
+    .set_fullscreen = wayland_layer_shell_set_fullscreen,
+    .set_title = wayland_layer_shell_set_title,
+};
+
+static gboolean wayland_display_late_setup(void) {
+  wayland_output *output = wayland_output_by_name(config.monitor);
+
+  struct wl_output *wlo = NULL;
+  if (output != NULL) {
+    wlo = output->output;
+  }
+  wayland->surface = wl_compositor_create_surface(wayland->compositor);
+
+  if (!wayland->shell->create_surface(wlo)) {
+    return FALSE;
+  }
+
+  if (config.global_kb && wayland->kb_shortcuts_inhibit_manager) {
+    g_debug("inhibit shortcuts from compositor");
+    GHashTableIter iter;
+    wayland_seat *seat;
+    g_hash_table_iter_init(&iter, wayland->seats);
+    while (g_hash_table_iter_next(&iter, NULL, (gpointer *)&seat)) {
+      // we don't need to keep track of these, they will get inactive when the
+      // surface is destroyed
+      zwp_keyboard_shortcuts_inhibit_manager_v1_inhibit_shortcuts(
+          wayland->kb_shortcuts_inhibit_manager, wayland->surface, seat->seat);
+    }
+  }
+
+  wl_surface_add_listener(wayland->surface, &wayland_surface_interface,
+                          wayland);
+  wl_surface_commit(wayland->surface);
+  wl_display_roundtrip(wayland->display);
+  wayland_frame_callback(wayland, wayland->frame_cb, 0);
+
+  return TRUE;
+}
+
+gboolean display_get_output_dimensions(int *width, int *height) {
+  return wayland->shell->get_output_dimensions(width, height);
+}
+
+void display_set_surface_dimensions(int width, int height, int x_margin,
+                                    int y_margin, int loc) {
+  wayland->shell->set_dimensions(width, height, x_margin, y_margin, loc);
+}
+
+gboolean display_capture_outside_clicks(void) {
+  return config.click_to_exit && wayland->shell->captures_outside_clicks;
+}
+
+void display_set_window_title(const char *title) {
+  wayland->shell->set_title(title);
 }
 
 static void wayland_display_early_cleanup(void) {
@@ -2007,15 +2193,7 @@ static void wayland_get_clipboard_data(int cb_type, ClipboardCb callback,
 }
 
 static void wayland_set_fullscreen_mode(void) {
-  if (!wayland->wlr_surface) {
-    return;
-  }
-  zwlr_layer_surface_v1_set_exclusive_zone(wayland->wlr_surface, -1);
-  zwlr_layer_surface_v1_set_size(wayland->wlr_surface, 0, 0);
-  wl_surface_commit(wayland->surface);
-  wl_display_roundtrip(wayland->display);
-
-  rofi_view_pool_refresh();
+  wayland->shell->set_fullscreen();
 }
 
 static display_proxy display_ = {

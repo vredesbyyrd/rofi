@@ -110,6 +110,8 @@ typedef struct {
 
   /** Wayland layer */
   char *wayland_layer;
+  /** Application identifier used by the window manager/compositor */
+  char *app_id;
   /** Windows location/gravity */
   WindowLocation location;
   /** Y offset */

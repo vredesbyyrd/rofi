@@ -14,10 +14,48 @@ typedef enum {
   WAYLAND_GLOBAL_COMPOSITOR,
   WAYLAND_GLOBAL_SHM,
   WAYLAND_GLOBAL_LAYER_SHELL,
+  WAYLAND_GLOBAL_XDG_SHELL,
+  WAYLAND_GLOBAL_XDG_DECORATION,
   WAYLAND_GLOBAL_KEYBOARD_SHORTCUTS_INHIBITOR,
   WAYLAND_GLOBAL_CURSOR_SHAPE,
   _WAYLAND_GLOBAL_SIZE,
 } wayland_global_name;
+
+/**
+ * The shell protocol used to give rofi's surface a role. Everything else
+ * (buffers, input, outputs, clipboard) is shared between the two.
+ */
+typedef struct _wayland_shell {
+  /** Name of the shell, for logging. */
+  const char *name;
+  /** Whether the surface can be grown to the output to catch outside clicks. */
+  gboolean captures_outside_clicks;
+  /** Give wayland->surface its role. @param output the requested output, or
+   * NULL to let the compositor pick. */
+  gboolean (*create_surface)(struct wl_output *output);
+  /** Destroy the role object, leaving wayland->surface alone. */
+  void (*destroy_surface)(void);
+  /** Request a size, and where to put it if the shell can express that. */
+  void (*set_dimensions)(int width, int height, int x_margin, int y_margin,
+                         int loc);
+  /** Usable area of the output rofi is on. */
+  gboolean (*get_output_dimensions)(int *width, int *height);
+  /** Take up the whole output. */
+  void (*set_fullscreen)(void);
+  /** Set the window title, if the shell has one. */
+  void (*set_title)(const char *title);
+} wayland_shell;
+
+extern const wayland_shell wayland_layer_shell;
+extern const wayland_shell wayland_xdg_shell;
+
+/**
+ * Usable size of the output rofi's surface is on, in logical pixels. Falls
+ * back to config.monitor and then to the first known output.
+ *
+ * @returns FALSE if no output size is known yet.
+ */
+gboolean wayland_display_get_output_size(int *width, int *height);
 
 typedef struct {
   uint32_t button;
@@ -55,6 +93,8 @@ typedef struct {
       *primary_selection_device_manager;
 
   struct zwlr_layer_shell_v1 *layer_shell;
+  struct xdg_wm_base *xdg_wm_base;
+  struct zxdg_decoration_manager_v1 *xdg_decoration_manager;
 
   struct zwp_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit_manager;
 
@@ -74,8 +114,12 @@ typedef struct {
   GHashTable *seats_by_name;
   wayland_seat *last_seat;
   GHashTable *outputs;
+  const wayland_shell *shell;
   struct wl_surface *surface;
   struct zwlr_layer_surface_v1 *wlr_surface;
+  struct xdg_surface *xdg_surface;
+  struct xdg_toplevel *xdg_toplevel;
+  struct zxdg_toplevel_decoration_v1 *xdg_decoration;
   struct wl_callback *frame_cb;
   size_t scales[3];
   int32_t scale;
@@ -83,6 +127,12 @@ typedef struct {
 
   clipboard_data clipboards[2];
 
+  /** Usable area of the output, as reported by the shell. */
+  uint32_t output_width;
+  uint32_t output_height;
+
+  /** Size last requested from the layer surface; 0 means compositor's choice.
+   */
   uint32_t layer_width;
   uint32_t layer_height;
 
@@ -134,6 +184,8 @@ struct _wayland_seat {
 #define WL_OUTPUT_INTERFACE_MIN_VERSION 2
 #define WL_OUTPUT_INTERFACE_MAX_VERSION 4
 #define WL_LAYER_SHELL_INTERFACE_VERSION 1
+#define WL_XDG_WM_BASE_INTERFACE_VERSION 1
+#define WL_XDG_DECORATION_INTERFACE_VERSION 1
 #define WL_KEYBOARD_SHORTCUTS_INHIBITOR_INTERFACE_VERSION 1
 
 extern wayland_stuff *wayland;

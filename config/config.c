@@ -93,6 +93,11 @@ Settings config = {
      * `background`, `bottom`, `top`, `overlay`. The default layer is `overlay`.
      */
     .wayland_layer = "overlay",
+    /**
+     * Application identifier. On Wayland this is the xdg-shell app id and the
+     * layer-shell namespace, on X11 it is used for the WM_CLASS property.
+     */
+    .app_id = "rofi",
     /** Y offset */
     .y_offset = 0,
     /** X offset */

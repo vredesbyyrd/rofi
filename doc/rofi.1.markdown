@@ -183,7 +183,16 @@ The X server to contact. Default is `$DISPLAY`.
 `-wayland-layer` *layer*
 
 On Wayland, specifies the layer where rofi is rendered. Available layers are
-`background`, `bottom`, `top`, `overlay`. The default layer is `overlay`.
+`background`, `bottom`, `top`, `overlay`. The default layer is `overlay`. This
+has no effect in `-normal-window` mode.
+
+`-app-id` *string*
+
+The application identifier **rofi** presents to the window manager or
+compositor, defaulting to `rofi`. On Wayland this is the xdg-shell app id in
+`-normal-window` mode and the layer-shell namespace otherwise; on X11 it is
+used for the `WM_CLASS` property. Set it to give an application built on
+**rofi** its own identity so it can be targeted by window rules.
 
 `-dmenu`
 
@@ -320,6 +329,16 @@ Use Pango markup to format output wherever possible.
 
 Make **rofi** react like a normal application window. Useful for scripts like
 Clerk that are basically an application.
+
+On Wayland this creates a regular `xdg-toplevel` window instead of a
+layer-shell surface, so the compositor tiles, places, sizes and focuses it like
+any other application, and **rofi** stays open while you switch to another
+window. It requires the `xdg-shell` protocol, and falls back to the layer shell
+with a warning if the compositor does not support it. Because the compositor
+owns placement and size in this mode, `location`, `anchor`, `x-offset`,
+`y-offset`, `-monitor` and `-wayland-layer` have no effect, and clicking
+outside of **rofi** does not dismiss it. Use `-app-id` together with your
+compositor's window rules to control how the window is handled.
 
 `-transient-window`
 
